@@ -41,11 +41,14 @@ final class Litestream
      */
     public static function boot(): void
     {
-        if (! self::enabled()) {
+        // The directory is created whether or not replication is on: without a
+        // bucket the app still has to be able to open a SQLite file somewhere,
+        // and on Cloud that somewhere does not exist in a fresh container.
+        SqlitePath::ensureDirectory();
+
+        if (! self::enabled() || ! self::onInstance()) {
             return;
         }
-
-        SqlitePath::ensureDirectory();
 
         if (self::ready()) {
             return;
@@ -86,6 +89,26 @@ final class Litestream
     public static function enabled(): bool
     {
         return self::bucket() !== null && is_executable(self::binary());
+    }
+
+    /**
+     * Am I the long-lived application instance, or a throwaway Cloud container?
+     *
+     * Measured on 2026-10-05: Cloud's build container sets LARAVEL_CLOUD_CI and
+     * its deploy-command container sets LARAVEL_CLOUD_DEPLOY; the application
+     * instance sets neither. Both of those containers have the bucket credentials
+     * injected and are gone within a minute, so restoring and replicating from
+     * either would put a second writer on the replica for no benefit at all.
+     *
+     * LITESTREAM_SKIP stays as a manual override for a context we have not met.
+     */
+    public static function onInstance(): bool
+    {
+        if (self::env('LITESTREAM_SKIP') !== null) {
+            return false;
+        }
+
+        return self::env('LARAVEL_CLOUD_CI') === null && self::env('LARAVEL_CLOUD_DEPLOY') === null;
     }
 
     public static function binary(): string
@@ -319,6 +342,7 @@ final class Litestream
     {
         return [
             'enabled' => self::enabled(),
+            'on_instance' => self::onInstance(),
             'binary' => self::binary(),
             'binary_present' => is_executable(self::binary()),
             'version' => is_executable(self::binary()) ? trim(self::run([self::binary(), 'version'])['output']) : null,

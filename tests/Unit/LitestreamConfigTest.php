@@ -26,7 +26,7 @@ final class LitestreamConfigTest extends TestCase
 
     protected function tearDown(): void
     {
-        foreach (['AWS_BUCKET', 'AWS_ENDPOINT', 'AWS_DEFAULT_REGION', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'APP_URL', 'LITESTREAM_DB_PATH'] as $key) {
+        foreach (['LARAVEL_CLOUD_CI', 'LARAVEL_CLOUD_DEPLOY', 'LITESTREAM_SKIP', 'AWS_BUCKET', 'AWS_ENDPOINT', 'AWS_DEFAULT_REGION', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'APP_URL', 'LITESTREAM_DB_PATH'] as $key) {
             putenv($key);
         }
 
@@ -70,5 +70,24 @@ final class LitestreamConfigTest extends TestCase
         putenv('AWS_BUCKET');
 
         $this->assertFalse(Litestream::enabled());
+    }
+
+    public function test_it_refuses_to_replicate_from_clouds_throwaway_containers(): void
+    {
+        $this->assertTrue(Litestream::onInstance());
+
+        putenv('LARAVEL_CLOUD_CI=1');
+        $this->assertFalse(Litestream::onInstance(), 'the build container must not replicate');
+        putenv('LARAVEL_CLOUD_CI');
+
+        putenv('LARAVEL_CLOUD_DEPLOY=1');
+        $this->assertFalse(Litestream::onInstance(), 'the deploy-command container must not replicate');
+        putenv('LARAVEL_CLOUD_DEPLOY');
+
+        putenv('LITESTREAM_SKIP=1');
+        $this->assertFalse(Litestream::onInstance(), 'the manual override must still work');
+        putenv('LITESTREAM_SKIP');
+
+        $this->assertTrue(Litestream::onInstance());
     }
 }

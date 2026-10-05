@@ -27,7 +27,12 @@ final class Probe
     private const array PUBLISHABLE = [
         'APP_ENV', 'APP_DEBUG', 'APP_NAME', 'APP_URL', 'APP_LOCALE', 'APP_MAINTENANCE_DRIVER',
         'AWS_BUCKET', 'AWS_DEFAULT_REGION', 'AWS_REGION', 'AWS_USE_PATH_STYLE_ENDPOINT',
-        'BROADCAST_CONNECTION', 'CACHE_STORE', 'DB_CONNECTION', 'DB_DATABASE',
+        'AUTORUN_ENABLED', 'AUTORUN_LARAVEL_MIGRATION', 'BROADCAST_CONNECTION', 'CACHE_STORE',
+        'DB_CONNECTION', 'DB_DATABASE', 'DOCUMENT_ROOT',
+        'LARAVEL_CLOUD_APP_NAME', 'LARAVEL_CLOUD_BUILD_NUMBER', 'LARAVEL_CLOUD_CI',
+        'LARAVEL_CLOUD_COMMIT', 'LARAVEL_CLOUD_COMMIT_SHA', 'LARAVEL_CLOUD_DEPLOY',
+        'LARAVEL_CLOUD_ENV_BRANCH', 'LARAVEL_CLOUD_ENV_NAME', 'LARAVEL_CLOUD_REGION',
+        'LITESTREAM_SKIP', 'PHP_FPM_PM_MAX_CHILDREN', 'SSL_MODE',
         'FILESYSTEM_DISK', 'HOME', 'HOSTNAME', 'LARAVEL_CLOUD', 'LITESTREAM_DB_PATH',
         'LOG_CHANNEL', 'LOG_LEVEL', 'OCTANE_SERVER', 'PATH', 'PWD', 'QUEUE_CONNECTION',
         'SERVER_SOFTWARE', 'SESSION_DRIVER', 'USER',
@@ -72,7 +77,10 @@ final class Probe
      */
     public static function machineId(): ?string
     {
-        foreach (['/proc/self/cgroup', '/proc/sys/kernel/random/boot_id'] as $path) {
+        // boot_id first: on Cloud the cgroup path is identical in the build
+        // container, the deploy container and the instance, so hashing it makes
+        // three different machines look like one. Measured 2026-10-05.
+        foreach (['/proc/sys/kernel/random/boot_id', '/proc/self/cgroup'] as $path) {
             if (is_readable($path) && ($raw = @file_get_contents($path)) !== false && trim($raw) !== '') {
                 return substr(hash('sha256', trim($raw)), 0, 16);
             }
@@ -101,7 +109,8 @@ final class Probe
     private static function release(): array
     {
         return [
-            'sha' => getenv('LARAVEL_CLOUD_DEPLOYMENT_SHA') ?: (getenv('GIT_COMMIT') ?: null),
+            'sha' => getenv('LARAVEL_CLOUD_COMMIT_SHA') ?: null,
+            'build' => getenv('LARAVEL_CLOUD_BUILD_NUMBER') ?: null,
             'marker' => is_file($f = base_path('.release')) ? trim((string) file_get_contents($f)) : null,
         ];
     }
