@@ -26,7 +26,7 @@ final class LitestreamConfigTest extends TestCase
 
     protected function tearDown(): void
     {
-        foreach (['LARAVEL_CLOUD_CI', 'LARAVEL_CLOUD_DEPLOY', 'LITESTREAM_SKIP', 'AWS_BUCKET', 'AWS_ENDPOINT', 'AWS_DEFAULT_REGION', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'APP_URL', 'LITESTREAM_DB_PATH'] as $key) {
+        foreach (['LARAVEL_CLOUD_DISK_CONFIG', 'LARAVEL_CLOUD_CI', 'LARAVEL_CLOUD_DEPLOY', 'LITESTREAM_SKIP', 'AWS_BUCKET', 'AWS_ENDPOINT', 'AWS_DEFAULT_REGION', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'APP_URL', 'LITESTREAM_DB_PATH'] as $key) {
             putenv($key);
         }
 
@@ -70,6 +70,39 @@ final class LitestreamConfigTest extends TestCase
         putenv('AWS_BUCKET');
 
         $this->assertFalse(Litestream::enabled());
+    }
+
+    public function test_it_reads_the_bucket_out_of_clouds_own_disk_config(): void
+    {
+        // A Laravel app on Cloud gets no AWS_* variables at all: it gets this
+        // one blob, the same one the framework's CloudBootstrapper reads.
+        foreach (['AWS_BUCKET', 'AWS_ENDPOINT', 'AWS_DEFAULT_REGION', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY'] as $key) {
+            putenv($key);
+        }
+
+        putenv('LARAVEL_CLOUD_DISK_CONFIG='.json_encode([
+            ['disk' => 'scoped-thing', 'scoped_disk' => 's3', 'prefix' => 'x'],
+            [
+                'disk' => 's3',
+                'bucket' => 'cloud-bucket',
+                'endpoint' => 'https://acct.r2.cloudflarestorage.com',
+                'region' => 'auto',
+                'access_key_id' => 'CLOUDKEYDONOTUSE',
+                'access_key_secret' => 'cloud-secret-not-real',
+                'is_default' => true,
+            ],
+        ]));
+
+        $this->assertTrue(Litestream::disk() !== null);
+        $this->assertSame('cloud-bucket', Litestream::disk()['bucket']);
+        $this->assertSame('https://acct.r2.cloudflarestorage.com', Litestream::disk()['endpoint']);
+
+        $config = Litestream::config();
+        $this->assertStringContainsString('bucket: cloud-bucket', $config);
+        $this->assertStringNotContainsString('CLOUDKEYDONOTUSE', $config);
+        $this->assertStringNotContainsString('cloud-secret-not-real', $config);
+
+        putenv('LARAVEL_CLOUD_DISK_CONFIG');
     }
 
     public function test_it_refuses_to_replicate_from_clouds_throwaway_containers(): void

@@ -20,9 +20,15 @@ Route::get('/', fn () => response()->json([
  * Comparing this with the same block printed by a build hook, a deploy command
  * or `cloud command:run` is how the experiment locates where each phase runs.
  */
-Route::get('/probe/info', fn () => response()->json(
-    Probe::snapshot('http') + ['journal_mode' => Probe::journalMode(), 'rows' => ProbeRow::summary()]
-));
+Route::get('/probe/info', function () {
+    try {
+        $rows = ProbeRow::summary();
+    } catch (Throwable $e) {
+        $rows = ['error' => $e->getMessage()];
+    }
+
+    return response()->json(Probe::snapshot('http') + ['journal_mode' => Probe::journalMode(), 'rows' => $rows]);
+});
 
 /** Append one row. The write path under test. */
 Route::get('/probe/write', function (Request $request) {

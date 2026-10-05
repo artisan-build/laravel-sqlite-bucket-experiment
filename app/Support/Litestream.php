@@ -16,26 +16,30 @@ use RuntimeException;
  * to open the database:
  *
  *   1. restore the database from the bucket if it is not on disk,
- *   2. start `litestream replicate` as a detached daemon,
- *   3. run migrations, so their writes land on top of the restored file,
+ *   2. run migrations, so the schema lands on the restored file,
+ *   3. start `litestream replicate` as a detached daemon,
  *   4. drop a readiness marker that every later request short-circuits on.
  *
  * A restore that fails ABORTS the boot. Starting empty on top of a live replica
  * would let Litestream replicate the empty database over the real one, which is
  * the one failure mode that destroys data rather than merely losing a request.
  *
- * Deliberately free of Laravel helpers: this runs before the framework boots.
+ * Deliberately free of Laravel helpers: this runs before the framework boots,
+ * which also means it cannot rely on Laravel having loaded .env yet.
  */
 final class Litestream
 {
     /** How long to wait for the daemon's control socket to appear, in seconds. */
-    private const float DAEMON_TIMEOUT = 10.0;
+    private const float DAEMON_TIMEOUT = 15.0;
 
     /** @var array<int, string> */
     private static array $log = [];
 
+    /** @var array<string, string>|null */
+    private static ?array $dotenv = null;
+
     /**
-     * Prepare the database before anything opens it. Safe to call on every request.
+     * Make the database safe to open. Safe — and cheap — to call on every request.
      *
      * @throws RuntimeException when the database cannot be made trustworthy
      */
@@ -46,11 +50,7 @@ final class Litestream
         // and on Cloud that somewhere does not exist in a fresh container.
         SqlitePath::ensureDirectory();
 
-        if (! self::enabled() || ! self::onInstance()) {
-            return;
-        }
-
-        if (self::ready()) {
+        if (! self::onInstance() || self::ready()) {
             return;
         }
 
@@ -68,10 +68,16 @@ final class Litestream
                 return;
             }
 
-            self::writeConfig();
-            self::restore();
-            self::startDaemon();
+            if (self::enabled()) {
+                self::writeConfig();
+                self::restore();
+            }
+
             self::migrate();
+
+            if (self::enabled()) {
+                self::startDaemon();
+            }
 
             file_put_contents(self::marker(), (string) time());
         } finally {
@@ -81,14 +87,14 @@ final class Litestream
     }
 
     /**
-     * Is the bucket attached and the binary shipped?
+     * Is a bucket attached and the binary shipped?
      *
      * This is the whole of the app's configuration surface: attaching a bucket
-     * makes Cloud inject AWS_BUCKET, which turns replication on. Nothing else.
+     * is what makes Cloud hand the app a bucket, which turns replication on.
      */
     public static function enabled(): bool
     {
-        return self::bucket() !== null && is_executable(self::binary());
+        return self::disk() !== null && is_executable(self::binary());
     }
 
     /**
@@ -96,8 +102,8 @@ final class Litestream
      *
      * Measured on 2026-10-05: Cloud's build container sets LARAVEL_CLOUD_CI and
      * its deploy-command container sets LARAVEL_CLOUD_DEPLOY; the application
-     * instance sets neither. Both of those containers have the bucket credentials
-     * injected and are gone within a minute, so restoring and replicating from
+     * instance sets neither. Both of those containers get the bucket handed to
+     * them and are gone within a minute, so restoring and replicating from
      * either would put a second writer on the replica for no benefit at all.
      *
      * LITESTREAM_SKIP stays as a manual override for a context we have not met.
@@ -113,7 +119,12 @@ final class Litestream
 
     public static function binary(): string
     {
-        return dirname(__DIR__, 2).'/bin/litestream';
+        return self::base().'/bin/litestream';
+    }
+
+    public static function base(): string
+    {
+        return dirname(__DIR__, 2);
     }
 
     public static function dir(): string
@@ -143,13 +154,17 @@ final class Litestream
 
     private static function marker(): string
     {
-        return self::dir().'/litestream.ready';
+        return self::dir().'/boot.ready';
     }
 
-    /** The replica is ready when the marker exists and the daemon is still alive. */
+    /** Prepared, and still replicating if it is supposed to be. */
     public static function ready(): bool
     {
-        return is_file(self::marker()) && self::daemonPid() !== null;
+        if (! is_file(self::marker())) {
+            return false;
+        }
+
+        return ! self::enabled() || self::daemonPid() !== null;
     }
 
     public static function daemonPid(): ?int
@@ -160,11 +175,7 @@ final class Litestream
 
         $pid = (int) trim((string) file_get_contents(self::pidPath()));
 
-        if ($pid <= 0) {
-            return null;
-        }
-
-        return self::alive($pid) ? $pid : null;
+        return $pid > 0 && self::alive($pid) ? $pid : null;
     }
 
     private static function alive(int $pid): bool
@@ -177,14 +188,18 @@ final class Litestream
     }
 
     /**
-     * The replica config. No credentials are written: Litestream reads
-     * AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY from the environment Cloud
-     * injects, so the file on disk holds nothing secret.
+     * The replica config.
+     *
+     * No credential is written here. Litestream takes the key and secret from
+     * the environment of the process we start, which keeps them off the
+     * filesystem and out of anybody's `ps` output.
      */
     public static function config(): string
     {
+        $disk = self::disk() ?? [];
+
         $lines = [
-            '# Generated by App\Support\Litestream. Credentials come from the environment.',
+            '# Generated by App\Support\Litestream. Credentials come from the process environment.',
             'logging:',
             '  level: info',
             '  type: text',
@@ -195,15 +210,15 @@ final class Litestream
             '  - path: '.SqlitePath::resolve(),
             '    replica:',
             '      type: s3',
-            '      bucket: '.self::bucket(),
+            '      bucket: '.($disk['bucket'] ?? ''),
             '      path: '.self::replicaPath(),
-            '      region: '.(self::env('AWS_DEFAULT_REGION') ?? self::env('AWS_REGION') ?? 'auto'),
+            '      region: '.($disk['region'] ?? 'auto'),
             '      force-path-style: true',
             '      sync-interval: 1s',
         ];
 
-        if (($endpoint = self::endpoint()) !== null) {
-            $lines[] = '      endpoint: '.$endpoint;
+        if (($disk['endpoint'] ?? null) !== null) {
+            $lines[] = '      endpoint: '.$disk['endpoint'];
         }
 
         return implode("\n", $lines)."\n";
@@ -212,6 +227,7 @@ final class Litestream
     private static function writeConfig(): void
     {
         file_put_contents(self::configPath(), self::config());
+        @chmod(self::configPath(), 0o600);
     }
 
     /**
@@ -235,17 +251,41 @@ final class Litestream
             '-if-db-not-exists',
             '-if-replica-exists',
             SqlitePath::resolve(),
-        ]);
+        ], env: self::credentials());
 
         if ($result['code'] !== 0) {
             throw new RuntimeException(
                 'litestream restore failed with exit code '.$result['code'].
-                ' — refusing to boot on an empty database over a live replica. '.
+                ' — refusing to boot on an empty database over a live replica: '.
                 trim($result['output'])
             );
         }
 
-        self::note('restore exit 0; database '.(is_file(SqlitePath::resolve()) ? 'restored' : 'absent (empty replica)'));
+        self::note('restore exit 0; database '.(is_file(SqlitePath::resolve()) ? 'restored from replica' : 'absent (replica empty)'));
+    }
+
+    /**
+     * Migrate here rather than in a deploy command.
+     *
+     * Measured on 2026-10-05: a Cloud deploy command runs in its own Kubernetes
+     * pod with its own filesystem, so migrating there touches a database no
+     * instance will ever see. Running it after the restore, under the same lock,
+     * is what guarantees the schema lands on the file that was just pulled from
+     * the bucket.
+     */
+    private static function migrate(): void
+    {
+        if (! is_file(SqlitePath::resolve())) {
+            touch(SqlitePath::resolve());
+        }
+
+        $result = self::run([PHP_BINARY, self::base().'/artisan', 'migrate', '--force', '--no-interaction'], env: ['LITESTREAM_SKIP' => '1']);
+
+        if ($result['code'] !== 0) {
+            throw new RuntimeException('migrate failed after restore: '.trim($result['output']));
+        }
+
+        self::note('migrate exit 0');
     }
 
     /**
@@ -269,10 +309,11 @@ final class Litestream
             escapeshellarg(self::logPath())
         );
 
-        $pid = (int) trim((string) shell_exec($command));
+        $result = self::run(command: $command, env: self::credentials());
+        $pid = (int) trim($result['output']);
 
         if ($pid <= 0) {
-            throw new RuntimeException('litestream replicate could not be started');
+            throw new RuntimeException('litestream replicate could not be started: '.trim($result['output']));
         }
 
         file_put_contents(self::pidPath(), (string) $pid);
@@ -287,66 +328,47 @@ final class Litestream
             }
 
             if (! self::alive($pid)) {
-                throw new RuntimeException(
-                    'litestream replicate exited immediately: '.self::tailLog()
-                );
+                throw new RuntimeException('litestream replicate exited immediately: '.self::tailLog());
             }
 
             usleep(100_000);
         }
 
         throw new RuntimeException(
-            'litestream replicate did not open its control socket within '.
-            self::DAEMON_TIMEOUT.'s: '.self::tailLog()
+            'litestream replicate did not open its control socket within '.self::DAEMON_TIMEOUT.'s: '.self::tailLog()
         );
-    }
-
-    /**
-     * Migrate here rather than in a deploy command.
-     *
-     * A Cloud deploy command runs somewhere this instance's database is not, so
-     * migrating there would either do nothing useful or — worse — build a second
-     * database. Running it after the restore, under the same lock, guarantees the
-     * schema lands on the file that was just pulled from the bucket and that the
-     * change is replicated.
-     */
-    private static function migrate(): void
-    {
-        $result = self::run([PHP_BINARY, dirname(__DIR__, 2).'/artisan', 'migrate', '--force', '--no-interaction']);
-
-        if ($result['code'] !== 0) {
-            throw new RuntimeException('migrate failed after restore: '.trim($result['output']));
-        }
-
-        self::note('migrate exit 0');
     }
 
     /** Ask the running daemon to flush now. Used by the probe endpoints. */
     public static function sync(): array
     {
-        return self::run([self::binary(), 'sync', '-config', self::configPath(), SqlitePath::resolve()]);
+        return self::run([self::binary(), 'sync', '-config', self::configPath(), SqlitePath::resolve()], env: self::credentials());
     }
 
     public static function status(): array
     {
-        return self::run([self::binary(), 'status', '-config', self::configPath()]);
+        return self::run([self::binary(), 'status', '-config', self::configPath()], env: self::credentials());
     }
 
     public static function ltx(): array
     {
-        return self::run([self::binary(), 'ltx', '-config', self::configPath(), SqlitePath::resolve()]);
+        return self::run([self::binary(), 'ltx', '-config', self::configPath(), SqlitePath::resolve()], env: self::credentials());
     }
 
     /** @return array<string, mixed> */
     public static function report(): array
     {
+        $disk = self::disk();
+
         return [
             'enabled' => self::enabled(),
             'on_instance' => self::onInstance(),
-            'binary' => self::binary(),
             'binary_present' => is_executable(self::binary()),
             'version' => is_executable(self::binary()) ? trim(self::run([self::binary(), 'version'])['output']) : null,
-            'bucket_attached' => self::bucket() !== null,
+            'bucket' => $disk['bucket'] ?? null,
+            'endpoint_host' => isset($disk['endpoint']) ? parse_url($disk['endpoint'], PHP_URL_HOST) : null,
+            'region' => $disk['region'] ?? null,
+            'credentials_present' => ($disk['key'] ?? null) !== null && ($disk['secret'] ?? null) !== null,
             'replica_path' => self::replicaPath(),
             'ready' => self::ready(),
             'daemon_pid' => self::daemonPid(),
@@ -381,14 +403,71 @@ final class Litestream
         return 'litestream/'.preg_replace('/[^a-z0-9.-]+/i', '-', $host);
     }
 
-    private static function bucket(): ?string
+    /**
+     * The bucket Cloud handed this app.
+     *
+     * A Laravel app on Cloud does NOT get AWS_* variables the way a Go or Rust
+     * app does — measured 2026-10-05. It gets one LARAVEL_CLOUD_DISK_CONFIG JSON
+     * blob, which the framework's own CloudBootstrapper turns into a filesystem
+     * disk. We read the same blob. The AWS_* branch is the fallback for every
+     * other host, including a plain server.
+     *
+     * @return array{bucket: string, endpoint: ?string, region: string, key: ?string, secret: ?string}|null
+     */
+    public static function disk(): ?array
     {
-        return self::env('AWS_BUCKET');
+        if (($raw = self::env('LARAVEL_CLOUD_DISK_CONFIG')) !== null) {
+            $disks = json_decode($raw, true);
+
+            foreach (is_array($disks) ? $disks : [] as $disk) {
+                if (($disk['scoped_disk'] ?? false) || blank($disk['bucket'] ?? null)) {
+                    continue;
+                }
+
+                return [
+                    'bucket' => (string) $disk['bucket'],
+                    'endpoint' => $disk['endpoint'] ?? null,
+                    'region' => (string) ($disk['region'] ?? 'auto'),
+                    'key' => $disk['access_key_id'] ?? null,
+                    'secret' => $disk['access_key_secret'] ?? null,
+                ];
+            }
+        }
+
+        if (($bucket = self::env('AWS_BUCKET')) !== null) {
+            return [
+                'bucket' => $bucket,
+                'endpoint' => self::env('AWS_ENDPOINT') ?? self::env('AWS_ENDPOINT_URL') ?? self::env('AWS_URL'),
+                'region' => self::env('AWS_DEFAULT_REGION') ?? self::env('AWS_REGION') ?? 'auto',
+                'key' => self::env('AWS_ACCESS_KEY_ID'),
+                'secret' => self::env('AWS_SECRET_ACCESS_KEY'),
+            ];
+        }
+
+        return null;
     }
 
-    private static function endpoint(): ?string
+    /**
+     * Credentials for a child process, passed through its environment so they
+     * never reach a config file or a command line.
+     *
+     * @return array<string, string>
+     */
+    private static function credentials(): array
     {
-        return self::env('AWS_ENDPOINT') ?? self::env('AWS_ENDPOINT_URL') ?? self::env('AWS_URL');
+        $disk = self::disk();
+
+        if ($disk === null || $disk['key'] === null || $disk['secret'] === null) {
+            return [];
+        }
+
+        return [
+            'AWS_ACCESS_KEY_ID' => $disk['key'],
+            'AWS_SECRET_ACCESS_KEY' => $disk['secret'],
+            'AWS_REGION' => $disk['region'],
+            'AWS_DEFAULT_REGION' => $disk['region'],
+            'LITESTREAM_SKIP' => '1',
+        ];
     }
 
     private static function env(string $key): ?string
@@ -399,7 +478,44 @@ final class Litestream
             $value = $_SERVER[$key] ?? $_ENV[$key] ?? null;
         }
 
+        // public/index.php runs this before the framework has read .env, and
+        // Cloud delivers some of its configuration through that file.
+        if (! is_string($value) || $value === '') {
+            $value = self::dotenv()[$key] ?? null;
+        }
+
         return is_string($value) && $value !== '' ? $value : null;
+    }
+
+    /** @return array<string, string> */
+    private static function dotenv(): array
+    {
+        if (self::$dotenv !== null) {
+            return self::$dotenv;
+        }
+
+        self::$dotenv = [];
+
+        if (! is_readable($file = self::base().'/.env')) {
+            return self::$dotenv;
+        }
+
+        foreach (preg_split('/\R/', (string) file_get_contents($file)) ?: [] as $line) {
+            if (! str_contains($line, '=') || str_starts_with(ltrim($line), '#')) {
+                continue;
+            }
+
+            [$key, $value] = explode('=', $line, 2);
+            $value = trim($value);
+
+            if (strlen($value) > 1 && ($value[0] === '"' || $value[0] === "'") && $value[-1] === $value[0]) {
+                $value = substr($value, 1, -1);
+            }
+
+            self::$dotenv[trim($key)] = $value;
+        }
+
+        return self::$dotenv;
     }
 
     private static function note(string $message): void
@@ -408,14 +524,25 @@ final class Litestream
     }
 
     /**
-     * @param  array<int, string>  $argv
+     * Run a child process, optionally with extra environment variables.
+     *
+     * @param  array<int, string>|null  $argv
+     * @param  array<string, string>  $env
      * @return array{code: int, output: string}
      */
-    public static function run(array $argv, int $timeout = 120): array
+    public static function run(?array $argv = null, string $command = '', array $env = []): array
     {
-        $command = implode(' ', array_map('escapeshellarg', $argv)).' 2>&1';
+        $command = $argv !== null
+            ? implode(' ', array_map('escapeshellarg', $argv)).' 2>&1'
+            : $command;
 
-        $process = proc_open($command, [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+        $environment = $env === [] ? null : array_merge(
+            array_filter($_SERVER, 'is_string'),
+            array_filter($_ENV, 'is_string'),
+            $env
+        );
+
+        $process = proc_open($command, [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes, null, $environment);
 
         if (! is_resource($process)) {
             return ['code' => -1, 'output' => 'could not start: '.$command];
