@@ -307,7 +307,7 @@ final class Litestream
             touch(SqlitePath::resolve());
         }
 
-        $result = self::run([PHP_BINARY, self::base().'/artisan', 'migrate', '--force', '--no-interaction'], env: ['LITESTREAM_SKIP' => '1']);
+        $result = self::run([self::php(), self::base().'/artisan', 'migrate', '--force', '--no-interaction'], env: ['LITESTREAM_SKIP' => '1']);
 
         if ($result['code'] !== 0) {
             throw new RuntimeException('migrate failed after restore: '.trim($result['output']));
@@ -365,6 +365,23 @@ final class Litestream
         throw new RuntimeException(
             'litestream replicate did not open its control socket within '.self::DAEMON_TIMEOUT.'s: '.self::tailLog()
         );
+    }
+
+    /**
+     * The PHP **CLI** binary.
+     *
+     * Under PHP-FPM, PHP_BINARY is php-fpm, which cannot run a script — it
+     * prints its own usage and exits non-zero, which read as "migrate failed".
+     */
+    public static function php(): string
+    {
+        foreach ([PHP_BINDIR.'/php', '/usr/local/bin/php', '/usr/bin/php'] as $candidate) {
+            if (is_executable($candidate)) {
+                return $candidate;
+            }
+        }
+
+        return PHP_SAPI === 'cli' ? PHP_BINARY : 'php';
     }
 
     /** Ask the running daemon to flush now. Used by the probe endpoints. */
