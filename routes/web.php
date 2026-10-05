@@ -2,11 +2,13 @@
 
 declare(strict_types=1);
 
+use App\Jobs\RecordProbe;
 use App\Models\Probe as ProbeRow;
 use App\Support\Litestream;
 use App\Support\Probe;
 use App\Support\SqlitePath;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Route;
 
 Route::get('/', fn () => response()->json([
@@ -65,6 +67,24 @@ Route::get('/probe/write', function (Request $request) {
         'host' => gethostname(),
         'daemon_pid' => Litestream::daemonPid(),
         'rows' => ProbeRow::count(),
+    ]);
+});
+
+/** Push a job onto the queue. Whether it ever runs, and where, is the finding. */
+Route::get('/probe/queue', function (Request $request) {
+    $seq = (int) $request->query('seq', '0');
+
+    if ($seq <= 0) {
+        return response()->json(['error' => 'seq must be a positive integer'], 422);
+    }
+
+    RecordProbe::dispatch($seq);
+
+    return response()->json([
+        'dispatched' => $seq,
+        'connection' => config('queue.default'),
+        'host' => gethostname(),
+        'pending' => DB::table('jobs')->count(),
     ]);
 });
 
