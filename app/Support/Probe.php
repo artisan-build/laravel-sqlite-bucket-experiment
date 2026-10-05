@@ -76,6 +76,14 @@ final class Probe
     }
 
     /**
+     * A per-NODE identity. Not per container.
+     *
+     * Measured 2026-10-05: /proc/sys/kernel/random/boot_id is the Kubernetes
+     * node's boot id, so two containers on the same node report the same value,
+     * and /proc/self/cgroup is identical in all three of Cloud's containers.
+     * Only the hostname identifies a container, which is why every probe reports
+     * that too.
+     *
      * A stable identity for the container, so two snapshots can be compared.
      *
      * The cgroup path carries the container id on Docker-like runtimes and is

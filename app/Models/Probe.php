@@ -40,7 +40,10 @@ final class Probe extends Model
             'gaps' => $gaps,
             'seqs' => $detailed ? $seqs : null,
             'labels' => $detailed ? self::query()->selectRaw('label, count(*) as n')->groupBy('label')->pluck('n', 'label') : null,
-            'machines' => $detailed ? self::query()->selectRaw('machine_id, count(*) as n, min(seq) as first, max(seq) as last')->groupBy('machine_id')->get() : null,
+            // Grouped by HOST, not machine_id: /proc/sys/kernel/random/boot_id
+            // is the Kubernetes node's, so every container on a node shares it.
+            // The hostname is the only per-container identity Cloud gives us.
+            'hosts' => $detailed ? self::query()->selectRaw('host, count(*) as n, min(seq) as first, max(seq) as last, min(written_at) as from_at, max(written_at) as to_at')->groupBy('host')->get() : null,
         ], fn ($v) => $v !== null);
     }
 }

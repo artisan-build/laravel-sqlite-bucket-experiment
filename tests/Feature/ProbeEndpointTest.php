@@ -55,6 +55,16 @@ final class ProbeEndpointTest extends TestCase
             ]);
     }
 
+    public function test_the_row_summary_groups_by_host_so_two_writers_are_visible(): void
+    {
+        ProbeRow::create(['seq' => 1, 'label' => 'overlap', 'host' => 'inst-old', 'machine_id' => 'node', 'written_at' => now()]);
+        ProbeRow::create(['seq' => 2, 'label' => 'overlap', 'host' => 'inst-new', 'machine_id' => 'node', 'written_at' => now()]);
+
+        $hosts = $this->getJson('/probe/rows')->assertOk()->json('hosts');
+
+        $this->assertSame(['inst-new', 'inst-old'], collect($hosts)->pluck('host')->sort()->values()->all());
+    }
+
     public function test_a_contiguous_run_reports_no_gaps(): void
     {
         foreach (range(1, 5) as $seq) {
