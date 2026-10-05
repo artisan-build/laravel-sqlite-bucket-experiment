@@ -18,7 +18,14 @@ return [
     |
     */
 
-    'driver' => env('SESSION_DRIVER', 'database'),
+    // 'cookie', not the skeleton's 'database': there is no writable database.
+    // Encrypted cookie sessions also need no shared store, which is what a
+    // stateless multi-instance docs site wants. See config/cache.php.
+    // A literal, not env(): this application has no writable database, so an
+    // environment variable must not be able to point the session store at one.
+    // Cookie sessions also need no shared store, which is what a stateless,
+    // multi-instance docs site wants.
+    'driver' => 'cookie',
 
     /*
     |--------------------------------------------------------------------------

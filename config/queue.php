@@ -13,7 +13,10 @@ return [
     |
     */
 
-    'default' => env('QUEUE_CONNECTION', 'database'),
+    // 'sync', not the skeleton's 'database': jobs run in the request that made
+    // them. A docs site has none; this is here so that dispatching one fails
+    // visibly in the request rather than silently writing to a missing table.
+    'default' => 'sync',
 
     /*
     |--------------------------------------------------------------------------
@@ -121,7 +124,7 @@ return [
     */
 
     'failed' => [
-        'driver' => env('QUEUE_FAILED_DRIVER', 'database-uuids'),
+        'driver' => 'null',
         'database' => env('DB_CONNECTION', 'sqlite'),
         'table' => 'failed_jobs',
     ],

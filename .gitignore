@@ -26,8 +26,7 @@ Homestead.json
 Homestead.yaml
 Thumbs.db
 
-/bin/litestream
-/database/boot.lock
-/database/boot.ready
-/database/boot.log
-/database/litestream.*
+# Built by `php artisan content:build`, never committed: the markdown in
+# content/ is the source of truth and the database is a build artifact.
+/database/content.sqlite
+/database/content.sqlite.building

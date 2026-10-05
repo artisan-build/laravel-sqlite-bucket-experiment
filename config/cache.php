@@ -15,7 +15,11 @@ return [
     |
     */
 
-    'default' => env('CACHE_STORE', 'database'),
+    // 'file', not the skeleton's 'database'. The cache is per-instance and dies
+    // with the container: nothing here may be a source of truth, and a second
+    // instance has its own copy. For a read-only content site that is fine --
+    // the content itself is immutable for the life of a deployment.
+    'default' => 'file',
 
     /*
     |--------------------------------------------------------------------------

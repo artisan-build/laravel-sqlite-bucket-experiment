@@ -2,110 +2,126 @@
 
 declare(strict_types=1);
 
-use App\Jobs\RecordProbe;
-use App\Models\Probe as ProbeRow;
-use App\Support\Litestream;
-use App\Support\Probe;
-use App\Support\SqlitePath;
-use Illuminate\Http\Request;
+use App\Content\Post;
+use App\Http\Controllers\PostController;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Route;
+use Illuminate\Support\Facades\Schema;
 
-Route::get('/', fn () => response()->json([
-    'app' => 'laravel-sqlite-bucket-experiment',
-    'probes' => ['/probe/info', '/probe/write?seq=N', '/probe/rows', '/probe/diag', '/probe/sync'],
-]));
+Route::get('/', [PostController::class, 'index'])->name('posts.index');
+Route::get('/search', [PostController::class, 'search'])->name('posts.search');
+Route::get('/posts/{slug}', [PostController::class, 'show'])->name('posts.show');
 
-/**
- * Everything about the machine and the database file serving this request.
- *
- * Comparing this with the same block printed by a build hook, a deploy command
- * or `cloud command:run` is how the experiment locates where each phase runs.
- */
-Route::get('/probe/info', function () {
-    try {
-        $rows = ProbeRow::summary();
-    } catch (Throwable $e) {
-        $rows = ['error' => $e->getMessage()];
-    }
+/*
+|--------------------------------------------------------------------------
+| Probes
+|--------------------------------------------------------------------------
+|
+| Not part of the pattern being proposed — these exist so this experiment's
+| claims can be checked from outside, over https, on the real platform. They
+| publish a fixed set of non-secret facts and never an environment value.
+|
+*/
 
-    return response()->json(Probe::snapshot('http') + ['journal_mode' => Probe::journalMode(), 'rows' => $rows]);
-});
+Route::prefix('probe')->group(function (): void {
+    /** Which build of which content is this container serving? */
+    Route::get('version', function () {
+        $path = database_path('content.sqlite');
 
-/** Append one row. The write path under test. */
-Route::get('/probe/write', function (Request $request) {
-    $seq = (int) $request->query('seq', '0');
-
-    if ($seq <= 0) {
-        return response()->json(['error' => 'seq must be a positive integer'], 422);
-    }
-
-    $created = true;
-
-    try {
-        ProbeRow::create([
-            'seq' => $seq,
-            'label' => (string) $request->query('label', 'write'),
+        return response()->json([
+            'commit' => substr((string) getenv('LARAVEL_CLOUD_COMMIT_SHA'), 0, 12) ?: null,
+            'build' => getenv('LARAVEL_CLOUD_BUILD_NUMBER') ?: null,
+            'deploy' => getenv('LARAVEL_CLOUD_DEPLOY') ?: null,
             'host' => gethostname(),
-            'machine_id' => Probe::machineId(),
-            'written_at' => now(),
+            'posts' => Post::query()->count(),
+            'latest' => Post::published()->value('slug'),
+            'bytes' => is_file($path) ? filesize($path) : 0,
+            'sha256' => is_file($path) ? substr(hash_file('sha256', $path), 0, 16) : null,
+            'at' => now()->toIso8601String(),
         ]);
-    } catch (Throwable $e) {
-        // A duplicate seq means the writer retried; it is not a new row and it
-        // must not be reported as one.
-        if (! str_contains($e->getMessage(), 'UNIQUE')) {
-            throw $e;
+    });
+
+    /** The database file, the connection, and what SQLite says about both. */
+    Route::get('info', function () {
+        $path = database_path('content.sqlite');
+        $connection = DB::connection('content');
+
+        return response()->json([
+            'host' => gethostname(),
+            'php' => PHP_VERSION,
+            'sqlite' => $connection->scalar('select sqlite_version()'),
+            'database_config' => config('database.connections.content.database'),
+            'default_connection' => config('database.default'),
+            'file' => [
+                'path' => $path,
+                'exists' => is_file($path),
+                'bytes' => is_file($path) ? filesize($path) : 0,
+                'writable' => is_file($path) && is_writable($path),
+                'sha256' => is_file($path) ? hash_file('sha256', $path) : null,
+                'wal_sidecar' => is_file($path.'-wal'),
+                'shm_sidecar' => is_file($path.'-shm'),
+            ],
+            'pragmas' => [
+                'journal_mode' => $connection->scalar('pragma journal_mode'),
+                'query_only' => $connection->scalar('pragma query_only'),
+            ],
+            'meta' => $connection->table('meta')->pluck('value', 'key'),
+            'tables' => $connection->table('sqlite_master')
+                ->whereIn('type', ['table', 'index'])->orderBy('name')->pluck('name'),
+            'posts' => Post::query()->count(),
+            'drivers' => [
+                'session' => config('session.driver'),
+                'cache' => config('cache.default'),
+                'queue' => config('queue.default'),
+            ],
+            'migrations_table_exists' => Schema::connection('content')->hasTable('migrations'),
+        ]);
+    });
+
+    /**
+     * Try to write, three ways, and report what happened.
+     *
+     * The design claims the connection refuses writes. A claim like that is
+     * worth nothing unless it is checked on the machine that serves traffic,
+     * so this probe tries raw SQL, an Eloquent insert and a DDL statement.
+     */
+    Route::get('write', function () {
+        $attempts = [
+            'insert' => fn () => DB::connection('content')->insert(
+                "insert into posts (slug, title, date, summary, html, source, source_bytes) values ('probe', 'probe', '2026-01-01', '', '', 'probe', 0)"
+            ),
+            // forceFill, not create(): mass-assignment protection would refuse
+            // this before the connection ever saw it, which would prove nothing.
+            'eloquent' => fn () => tap(new Post)->forceFill([
+                'slug' => 'probe-eloquent', 'title' => 'probe', 'date' => '2026-01-01',
+                'summary' => '', 'html' => '', 'source' => 'probe', 'source_bytes' => 0,
+            ])->save(),
+            'ddl' => fn () => DB::connection('content')->statement('create table probe_write (x integer)'),
+            'delete' => fn () => DB::connection('content')->delete('delete from posts where id = 1'),
+        ];
+
+        $results = [];
+
+        foreach ($attempts as $name => $attempt) {
+            try {
+                $attempt();
+                $results[$name] = ['refused' => false, 'note' => 'THE WRITE SUCCEEDED'];
+            } catch (Throwable $e) {
+                $results[$name] = [
+                    'refused' => true,
+                    'exception' => $e::class,
+                    'message' => $e->getMessage(),
+                ];
+            }
         }
 
-        $created = false;
-    }
+        $refused = collect($results)->every(fn (array $r) => $r['refused']);
 
-    return response()->json([
-        'seq' => $seq,
-        'created' => $created,
-        'machine_id' => Probe::machineId(),
-        'host' => gethostname(),
-        'daemon_pid' => Litestream::daemonPid(),
-        'rows' => ProbeRow::count(),
-    ]);
+        return response()->json([
+            'host' => gethostname(),
+            'all_writes_refused' => $refused,
+            'rows_after' => Post::query()->count(),
+            'attempts' => $results,
+        ], $refused ? 200 : 500);
+    });
 });
-
-/** Push a job onto the queue. Whether it ever runs, and where, is the finding. */
-Route::get('/probe/queue', function (Request $request) {
-    $seq = (int) $request->query('seq', '0');
-
-    if ($seq <= 0) {
-        return response()->json(['error' => 'seq must be a positive integer'], 422);
-    }
-
-    RecordProbe::dispatch($seq);
-
-    return response()->json([
-        'dispatched' => $seq,
-        'connection' => config('queue.default'),
-        'host' => gethostname(),
-        'pending' => DB::table('jobs')->count(),
-    ]);
-});
-
-/** What is actually in the database right now, and where the holes are. */
-Route::get('/probe/rows', fn () => response()->json(ProbeRow::summary(detailed: true)));
-
-/** Force Litestream to flush, so a test can take a known-good checkpoint. */
-Route::get('/probe/sync', fn () => response()->json([
-    'sync' => Litestream::sync(),
-    'status' => Litestream::status(),
-]));
-
-/** A fixed set of shell diagnostics. No arbitrary command execution. */
-Route::get('/probe/diag', fn () => response()->json([
-    'machine_id' => Probe::machineId(),
-    'ps' => Litestream::run(['ps', '-eo', 'pid,ppid,etime,comm'])['output'],
-    'db_dir' => Litestream::run(['ls', '-la', SqlitePath::directory()])['output'],
-    'app_dir' => Litestream::run(['ls', '-la', base_path()])['output'],
-    'bin_dir' => Litestream::run(['ls', '-la', base_path('bin')])['output'],
-    'df' => Litestream::run(['df', '-h'])['output'],
-    'litestream_status' => Litestream::status(),
-    'litestream_ltx' => Litestream::ltx(),
-    'litestream_log' => Litestream::tailLog(60),
-]));
