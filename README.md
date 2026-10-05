@@ -1,58 +1,75 @@
-<p align="center"><a href="https://laravel.com" target="_blank"><img src="https://raw.githubusercontent.com/laravel/art/master/logo-lockup/5%20SVG/2%20CMYK/1%20Full%20Color/laravel-logolockup-cmyk-red.svg" width="400" alt="Laravel Logo"></a></p>
+# A docs site with no database
 
-<p align="center">
-<a href="https://github.com/laravel/framework/actions"><img src="https://github.com/laravel/framework/workflows/tests/badge.svg" alt="Build Status"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/dt/laravel/framework" alt="Total Downloads"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/v/laravel/framework" alt="Latest Stable Version"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/l/laravel/framework" alt="License"></a>
-</p>
+A throwaway experiment on the `read-only-markdown` branch: a stock Laravel 13 app
+running on [Laravel Cloud](https://cloud.laravel.com) with **no managed database,
+no cache, no queue and no object storage attached**.
 
-## About Laravel
+The content is 20 markdown files in [`content/`](content). An artisan command
+compiles them into a SQLite file during the Cloud **build**, and the application
+opens that file **read-only**.
 
-Laravel is a web application framework with expressive, elegant syntax. We believe development must be an enjoyable and creative experience to be truly fulfilling. Laravel takes the pain out of development by easing common tasks used in many web projects, such as:
-
-- [Simple, fast routing engine](https://laravel.com/docs/routing).
-- [Powerful dependency injection container](https://laravel.com/docs/container).
-- Multiple back-ends for [session](https://laravel.com/docs/session) and [cache](https://laravel.com/docs/cache) storage.
-- Expressive, intuitive [database ORM](https://laravel.com/docs/eloquent).
-- Database agnostic [schema migrations](https://laravel.com/docs/migrations).
-- [Robust background job processing](https://laravel.com/docs/queues).
-- [Real-time event broadcasting](https://laravel.com/docs/broadcasting).
-
-Laravel is accessible, powerful, and provides tools required for large, robust applications.
-
-## Learning Laravel
-
-Laravel has the most extensive and thorough [documentation](https://laravel.com/docs) and video tutorial library of all modern web application frameworks, making it a breeze to get started with the framework.
-
-In addition, [Laracasts](https://laracasts.com) contains thousands of video tutorials on a range of topics including Laravel, modern PHP, unit testing, and JavaScript. Boost your skills by digging into our comprehensive video library.
-
-You can also watch bite-sized lessons with real-world projects on [Laravel Learn](https://laravel.com/learn), where you will be guided through building a Laravel application from scratch while learning PHP fundamentals.
-
-## Agentic Development
-
-Laravel's predictable structure and conventions make it ideal for AI coding agents like Claude Code, Cursor, and GitHub Copilot. Install [Laravel Boost](https://laravel.com/docs/ai) to supercharge your AI workflow:
-
-```bash
-composer require laravel/boost --dev
-
-php artisan boost:install
+```sh
+php artisan content:build      # content/*.md -> database/content.sqlite
 ```
 
-Boost provides your agent 15+ tools and skills that help agents build Laravel applications while following best practices.
+## How it fits together
 
-## Contributing
+| Piece | Where |
+|---|---|
+| The content | `content/*.md`, with `title`, `slug`, `date`, `summary` front matter |
+| The compiler | `app/Content/ContentBuilder.php` — posts table + an external-content FTS5 index |
+| The command | `php artisan content:build`, run in the Cloud **build command** |
+| The connection | `config/database.php` — `file:…/content.sqlite?mode=ro&immutable=1`, the only connection, and the default |
+| The site | `app/Http/Controllers/PostController.php`, `routes/web.php`, `resources/views/posts/` |
 
-Thank you for considering contributing to the Laravel framework! The contribution guide can be found in the [Laravel documentation](https://laravel.com/docs/contributions).
+Three things make it work on Cloud specifically:
 
-## Code of Conduct
+1. **The import runs in the BUILD, never in a deploy command.** A Cloud deploy
+   command runs in its own Kubernetes pod whose filesystem no instance ever sees,
+   so a `content:build` there would compile a database and throw it away.
+2. **The file lives inside the app root** (`database/content.sqlite`), because
+   build writes outside `/var/www/html` do not survive into the image.
+3. **Nothing defaults to the `database` driver.** Sessions are cookies, the cache
+   is files, the queue is `sync` — as literals in committed config, so no
+   environment variable can point them at a database that cannot be written.
 
-In order to ensure that the Laravel community is welcoming to all, please review and abide by the [Code of Conduct](https://laravel.com/docs/contributions#code-of-conduct).
+There is no `migrate` anywhere in the deploy path, and nothing to back up: the
+markdown is the source of truth and the database is a build artifact.
 
-## Security Vulnerabilities
+## Read-only for real
 
-If you discover a security vulnerability within Laravel, please send an e-mail to Taylor Otwell via [taylor@laravel.com](mailto:taylor@laravel.com). All security vulnerabilities will be promptly addressed.
+```php
+'database' => 'file:'.database_path('content.sqlite').'?mode=ro&immutable=1',
+```
 
-## License
+`mode=ro` opens with `SQLITE_OPEN_READONLY`, so a write fails with *attempt to
+write a readonly database* rather than by convention. `immutable=1` promises the
+file cannot change while open — true, since it is built once and the container's
+filesystem is replaced on the next deploy — so SQLite takes no locks and creates
+no `-wal`/`-shm` sidecars beside a file it could not write anyway. Laravel passes
+a `file:`-prefixed database through to the DSN untouched, so no custom connector
+is needed.
 
-The Laravel framework is open-sourced software licensed under the [MIT license](https://opensource.org/licenses/MIT).
+`/probe/write` on the running site tries four write paths and reports what each
+one did. `/probe/info` reports the file, the pragmas and the drivers in use.
+
+## Running it locally
+
+```sh
+composer install
+cp .env.example .env && php artisan key:generate
+php artisan content:build
+php artisan serve
+```
+
+```sh
+php artisan test        # 32 tests, including that the build is reproducible
+vendor/bin/pint --test
+```
+
+## The other branch
+
+`main` holds the first half of this experiment: the same app keeping a *writable*
+SQLite database on the instance and replicating it to a Cloud bucket with
+Litestream. That works, and Cloud's overlapping deploys lose writes through it.
+This branch asks what happens if nothing writes at all.
