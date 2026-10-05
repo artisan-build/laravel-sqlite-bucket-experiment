@@ -9,6 +9,21 @@ define('LARAVEL_START', microtime(true));
 // Register the Composer autoloader...
 require __DIR__.'/vendor/autoload.php';
 
+// Artisan commands on the instance — the scheduler, a deploy command, a remote
+// `cloud command:run` — can reach the database before any HTTP request has, so
+// they have to pay for the restore too. LITESTREAM_SKIP exists for the build,
+// which runs artisan (package discovery) in a container that must never open a
+// replica.
+if (getenv('LITESTREAM_SKIP') === false || getenv('LITESTREAM_SKIP') === '') {
+    try {
+        App\Support\Litestream::boot();
+    } catch (Throwable $e) {
+        fwrite(STDERR, 'litestream: '.$e->getMessage().PHP_EOL);
+
+        exit(1);
+    }
+}
+
 // Bootstrap Laravel and handle the command...
 /** @var Application $app */
 $app = require_once __DIR__.'/bootstrap/app.php';

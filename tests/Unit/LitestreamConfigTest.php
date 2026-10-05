@@ -1,0 +1,74 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Tests\Unit;
+
+use App\Support\Litestream;
+use App\Support\SqlitePath;
+use PHPUnit\Framework\TestCase;
+
+final class LitestreamConfigTest extends TestCase
+{
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        putenv('AWS_BUCKET=example-bucket');
+        putenv('AWS_ENDPOINT=https://accountid.r2.cloudflarestorage.com');
+        putenv('AWS_DEFAULT_REGION=auto');
+        putenv('AWS_ACCESS_KEY_ID=AKIAEXAMPLEDONOTUSE');
+        putenv('AWS_SECRET_ACCESS_KEY=shhh-not-a-real-secret');
+        putenv('APP_URL=https://sqlite-bucket-production-example.laravel.cloud');
+        putenv('LITESTREAM_DB_PATH=/tmp/sqlite-bucket-test/database.sqlite');
+        SqlitePath::flush();
+    }
+
+    protected function tearDown(): void
+    {
+        foreach (['AWS_BUCKET', 'AWS_ENDPOINT', 'AWS_DEFAULT_REGION', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'APP_URL', 'LITESTREAM_DB_PATH'] as $key) {
+            putenv($key);
+        }
+
+        SqlitePath::flush();
+
+        parent::tearDown();
+    }
+
+    public function test_the_generated_config_never_contains_a_credential(): void
+    {
+        $config = Litestream::config();
+
+        $this->assertStringNotContainsString('AKIAEXAMPLEDONOTUSE', $config);
+        $this->assertStringNotContainsString('shhh-not-a-real-secret', $config);
+        $this->assertStringNotContainsString('access-key-id', $config);
+        $this->assertStringNotContainsString('secret-access-key', $config);
+    }
+
+    public function test_it_replicates_the_resolved_database_to_the_attached_bucket(): void
+    {
+        $config = Litestream::config();
+
+        $this->assertStringContainsString('- path: /tmp/sqlite-bucket-test/database.sqlite', $config);
+        $this->assertStringContainsString('type: s3', $config);
+        $this->assertStringContainsString('bucket: example-bucket', $config);
+        $this->assertStringContainsString('endpoint: https://accountid.r2.cloudflarestorage.com', $config);
+        $this->assertStringContainsString('region: auto', $config);
+    }
+
+    public function test_each_environment_gets_its_own_replica_prefix(): void
+    {
+        $this->assertSame(
+            'litestream/sqlite-bucket-production-example.laravel.cloud',
+            Litestream::replicaPath()
+        );
+        $this->assertStringContainsString('path: litestream/sqlite-bucket-production-example.laravel.cloud', Litestream::config());
+    }
+
+    public function test_replication_is_off_until_a_bucket_is_attached(): void
+    {
+        putenv('AWS_BUCKET');
+
+        $this->assertFalse(Litestream::enabled());
+    }
+}

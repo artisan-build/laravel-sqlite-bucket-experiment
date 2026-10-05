@@ -1,5 +1,6 @@
 <?php
 
+use App\Support\SqlitePath;
 use Illuminate\Support\Str;
 use Pdo\Mysql;
 
@@ -35,12 +36,16 @@ return [
         'sqlite' => [
             'driver' => 'sqlite',
             'url' => env('DB_URL'),
-            'database' => env('DB_DATABASE', database_path('database.sqlite')),
+            'database' => env('DB_DATABASE', SqlitePath::resolve()),
             'prefix' => '',
             'foreign_key_constraints' => env('DB_FOREIGN_KEYS', true),
-            'busy_timeout' => null,
-            'journal_mode' => null,
-            'synchronous' => null,
+            // Litestream requires WAL, and a replicated database wants a long
+            // busy timeout because the replication process also reads the file.
+            // Hard-coded rather than env-driven: an installer must not have to
+            // know any of this (and must not be able to get it wrong).
+            'busy_timeout' => 5000,
+            'journal_mode' => 'wal',
+            'synchronous' => 'NORMAL',
             'transaction_mode' => 'DEFERRED',
         ],
 
