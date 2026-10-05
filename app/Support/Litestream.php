@@ -387,7 +387,14 @@ final class Litestream
     /** Ask the running daemon to flush now. Used by the probe endpoints. */
     public static function sync(): array
     {
-        return self::run([self::binary(), 'sync', '-config', self::configPath(), SqlitePath::resolve()], env: self::credentials());
+        // `sync` talks to the running daemon over its control socket, so unlike
+        // every other subcommand it takes -socket rather than -config.
+        return self::run([
+            self::binary(), 'sync',
+            '-socket', self::socketPath(),
+            '-wait', '-timeout', '20',
+            SqlitePath::resolve(),
+        ], env: self::credentials());
     }
 
     public static function status(): array
