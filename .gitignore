@@ -27,3 +27,7 @@ Homestead.yaml
 Thumbs.db
 
 /bin/litestream
+/database/boot.lock
+/database/boot.ready
+/database/boot.log
+/database/litestream.*

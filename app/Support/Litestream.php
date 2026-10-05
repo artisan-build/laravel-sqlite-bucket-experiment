@@ -71,6 +71,7 @@ final class Litestream
             if (self::enabled()) {
                 self::writeConfig();
                 self::restore();
+                self::adopt();
             }
 
             self::migrate();
@@ -293,6 +294,52 @@ final class Litestream
     }
 
     /**
+     * One-time import of a replica somebody else wrote — the Forge migration path.
+     *
+     * A server moving in runs Litestream against the same bucket under its own
+     * prefix; naming that prefix in LITESTREAM_RESTORE_FROM makes the first boot
+     * on Cloud pull that database down instead of starting empty. It only ever
+     * fires when this environment's own replica is empty and nothing is on disk,
+     * so leaving the variable set is harmless after the move.
+     *
+     * This is the one place the app asks for configuration it cannot derive, and
+     * it is a gap, not a feature: see the report.
+     */
+    private static function adopt(): void
+    {
+        $from = self::env('LITESTREAM_RESTORE_FROM');
+
+        if ($from === null || is_file(SqlitePath::resolve())) {
+            return;
+        }
+
+        $config = self::dir().'/litestream-source.yml';
+        file_put_contents($config, str_replace(
+            'path: '.self::replicaPath(),
+            'path: '.$from,
+            self::config()
+        ));
+        @chmod($config, 0o600);
+
+        $result = self::run([
+            self::binary(), 'restore',
+            '-config', $config,
+            '-if-db-not-exists',
+            SqlitePath::resolve(),
+        ], env: self::credentials());
+
+        @unlink($config);
+
+        if ($result['code'] !== 0) {
+            throw new RuntimeException(
+                'litestream could not adopt the replica at '.$from.': '.trim($result['output'])
+            );
+        }
+
+        self::note('adopted replica from '.$from.'; database '.(is_file(SqlitePath::resolve()) ? 'restored' : 'still absent'));
+    }
+
+    /**
      * Migrate here rather than in a deploy command.
      *
      * Measured on 2026-10-05: a Cloud deploy command runs in its own Kubernetes
@@ -423,6 +470,7 @@ final class Litestream
             'region' => $disk['region'] ?? null,
             'credentials_present' => ($disk['key'] ?? null) !== null && ($disk['secret'] ?? null) !== null,
             'replica_path' => self::replicaPath(),
+            'restore_from' => self::env('LITESTREAM_RESTORE_FROM'),
             'ready' => self::ready(),
             'daemon_pid' => self::daemonPid(),
             'socket' => file_exists(self::socketPath()),
