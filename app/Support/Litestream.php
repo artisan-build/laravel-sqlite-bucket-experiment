@@ -100,26 +100,46 @@ final class Litestream
     /**
      * Am I the long-lived application instance, or a throwaway Cloud container?
      *
-     * Measured on 2026-10-05: Cloud's build container sets LARAVEL_CLOUD_CI and
-     * its deploy-command container sets LARAVEL_CLOUD_DEPLOY; the application
-     * instance sets neither. Both of those containers get the bucket handed to
-     * them and are gone within a minute, so restoring and replicating from
-     * either would put a second writer on the replica for no benefit at all.
+     * Measured on 2026-10-05. Cloud runs the same image in three places:
      *
-     * LITESTREAM_SKIP stays as a manual override for a context we have not met.
+     *   build          host `buildkitsandbox`, no HOSTNAME, LARAVEL_CLOUD_CI set
+     *   deploy command host `dj-depl-<deployment-id>-*`, its own pod and disk
+     *   the instance   host `inst-<instance-id>-<build>-app-*`
+     *
+     * All three are handed the bucket, and the first two are gone within a
+     * minute, so replicating from either would put a second writer on the
+     * replica for nothing. LARAVEL_CLOUD_DEPLOY is NOT the discriminator it
+     * looks like — it is the deploy NUMBER and is set everywhere, which is the
+     * mistake this comment exists to stop someone repeating.
+     *
+     * The test is positive — the hostname must look like an instance — so that
+     * if Cloud ever renames these containers this fails closed, with a loud
+     * unprepared database, rather than open with two writers.
      */
     public static function onInstance(): bool
     {
         return self::skipReason() === null;
     }
 
-    /** Which variable, if any, told us not to replicate from here. */
+    /** Which signal, if any, told us not to replicate from here. */
     public static function skipReason(): ?string
     {
-        foreach (['LITESTREAM_SKIP', 'LARAVEL_CLOUD_CI', 'LARAVEL_CLOUD_DEPLOY'] as $key) {
-            if (self::env($key) !== null) {
-                return $key.' is set';
-            }
+        if (self::env('LITESTREAM_SKIP') !== null) {
+            return 'LITESTREAM_SKIP is set';
+        }
+
+        if (self::env('LARAVEL_CLOUD') === null) {
+            return null;
+        }
+
+        if (self::env('LARAVEL_CLOUD_CI') !== null) {
+            return 'LARAVEL_CLOUD_CI is set: this is the build container';
+        }
+
+        $host = (string) (self::env('HOSTNAME') ?? gethostname());
+
+        if (! str_starts_with($host, 'inst-')) {
+            return 'hostname '.$host.' is not an application instance';
         }
 
         return null;

@@ -26,7 +26,7 @@ final class LitestreamConfigTest extends TestCase
 
     protected function tearDown(): void
     {
-        foreach (['LARAVEL_CLOUD_DISK_CONFIG', 'LARAVEL_CLOUD_CI', 'LARAVEL_CLOUD_DEPLOY', 'LITESTREAM_SKIP', 'AWS_BUCKET', 'AWS_ENDPOINT', 'AWS_DEFAULT_REGION', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'APP_URL', 'LITESTREAM_DB_PATH'] as $key) {
+        foreach (['LARAVEL_CLOUD_DISK_CONFIG', 'LARAVEL_CLOUD', 'LARAVEL_CLOUD_CI', 'LARAVEL_CLOUD_DEPLOY', 'HOSTNAME', 'LITESTREAM_SKIP', 'AWS_BUCKET', 'AWS_ENDPOINT', 'AWS_DEFAULT_REGION', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'APP_URL', 'LITESTREAM_DB_PATH'] as $key) {
             putenv($key);
         }
 
@@ -107,20 +107,33 @@ final class LitestreamConfigTest extends TestCase
 
     public function test_it_refuses_to_replicate_from_clouds_throwaway_containers(): void
     {
-        $this->assertTrue(Litestream::onInstance());
+        $this->assertTrue(Litestream::onInstance(), 'off Cloud entirely, nothing is in the way');
 
+        putenv('LARAVEL_CLOUD=1');
+        putenv('HOSTNAME=inst-a2e8ca99-c82e-42c3-8f58-68f6265ce0a8-6162532-app-597bxwcch');
+        $this->assertTrue(Litestream::onInstance(), 'the application instance replicates');
+
+        putenv('HOSTNAME=dj-depl-a2e8d36f-9901-4d44-810a-9a099c368a80-4tjbd');
+        $this->assertFalse(Litestream::onInstance(), 'the deploy-command pod must not replicate');
+        $this->assertStringContainsString('not an application instance', (string) Litestream::skipReason());
+
+        putenv('HOSTNAME=buildkitsandbox');
         putenv('LARAVEL_CLOUD_CI=1');
         $this->assertFalse(Litestream::onInstance(), 'the build container must not replicate');
+        $this->assertStringContainsString('build container', (string) Litestream::skipReason());
         putenv('LARAVEL_CLOUD_CI');
 
-        putenv('LARAVEL_CLOUD_DEPLOY=1');
-        $this->assertFalse(Litestream::onInstance(), 'the deploy-command container must not replicate');
-        putenv('LARAVEL_CLOUD_DEPLOY');
+        // LARAVEL_CLOUD_DEPLOY is the deploy NUMBER and is set on the instance
+        // too, so it must never be read as "this is the deploy container".
+        putenv('HOSTNAME=inst-a2e8ca99-c82e-42c3-8f58-68f6265ce0a8-6162532-app-597bxwcch');
+        putenv('LARAVEL_CLOUD_DEPLOY=9');
+        $this->assertTrue(Litestream::onInstance(), 'the deploy number is not a container marker');
 
         putenv('LITESTREAM_SKIP=1');
         $this->assertFalse(Litestream::onInstance(), 'the manual override must still work');
-        putenv('LITESTREAM_SKIP');
 
-        $this->assertTrue(Litestream::onInstance());
+        foreach (['LITESTREAM_SKIP', 'LARAVEL_CLOUD', 'LARAVEL_CLOUD_DEPLOY', 'HOSTNAME'] as $key) {
+            putenv($key);
+        }
     }
 }
