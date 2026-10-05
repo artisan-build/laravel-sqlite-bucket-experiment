@@ -62,6 +62,7 @@ Route::get('/probe/write', function (Request $request) {
         'seq' => $seq,
         'created' => $created,
         'machine_id' => Probe::machineId(),
+        'host' => gethostname(),
         'daemon_pid' => Litestream::daemonPid(),
         'rows' => ProbeRow::count(),
     ]);

@@ -429,6 +429,7 @@ final class Litestream
             'marker_at' => is_file(self::marker()) ? gmdate('c', (int) file_get_contents(self::marker())) : null,
             'log_tail' => self::tailLog(),
             'boot_notes' => self::$log,
+            'boot_log' => self::bootLog(),
         ];
     }
 
@@ -571,9 +572,36 @@ final class Litestream
         return self::$dotenv;
     }
 
+    public static function bootLogPath(): string
+    {
+        return self::dir().'/boot.log';
+    }
+
+    /**
+     * Boot notes go to a file as well as to memory.
+     *
+     * Only the one PHP-FPM worker that paid for the restore holds them in
+     * memory, and it is gone by the time anyone asks. The file is the evidence
+     * that THIS container restored before it served.
+     */
     private static function note(string $message): void
     {
-        self::$log[] = gmdate('H:i:s').' '.$message;
+        $line = gmdate('c').' '.gethostname().' pid '.getmypid().' '.$message;
+
+        self::$log[] = $line;
+
+        @file_put_contents(self::bootLogPath(), $line."\n", FILE_APPEND);
+    }
+
+    public static function bootLog(int $lines = 20): string
+    {
+        if (! is_file(self::bootLogPath())) {
+            return '';
+        }
+
+        $all = preg_split('/\R/', (string) file_get_contents(self::bootLogPath())) ?: [];
+
+        return implode("\n", array_slice($all, -$lines));
     }
 
     /**
