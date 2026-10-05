@@ -110,11 +110,19 @@ final class Litestream
      */
     public static function onInstance(): bool
     {
-        if (self::env('LITESTREAM_SKIP') !== null) {
-            return false;
+        return self::skipReason() === null;
+    }
+
+    /** Which variable, if any, told us not to replicate from here. */
+    public static function skipReason(): ?string
+    {
+        foreach (['LITESTREAM_SKIP', 'LARAVEL_CLOUD_CI', 'LARAVEL_CLOUD_DEPLOY'] as $key) {
+            if (self::env($key) !== null) {
+                return $key.' is set';
+            }
         }
 
-        return self::env('LARAVEL_CLOUD_CI') === null && self::env('LARAVEL_CLOUD_DEPLOY') === null;
+        return null;
     }
 
     public static function binary(): string
@@ -363,6 +371,7 @@ final class Litestream
         return [
             'enabled' => self::enabled(),
             'on_instance' => self::onInstance(),
+            'skip_reason' => self::skipReason(),
             'binary_present' => is_executable(self::binary()),
             'version' => is_executable(self::binary()) ? trim(self::run([self::binary(), 'version'])['output']) : null,
             'bucket' => $disk['bucket'] ?? null,

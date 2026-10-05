@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Support;
 
 use Illuminate\Support\Facades\DB;
+use Throwable;
 
 /**
  * Everything the experiment needs to know about the machine it is running on.
@@ -59,6 +60,7 @@ final class Probe
             'db' => self::database($db),
             'litestream' => Litestream::report(),
             'env_keys' => self::envKeys(),
+            'dotenv_keys' => self::dotenvKeys(),
             'writable' => self::writable(),
         ];
     }
@@ -66,7 +68,11 @@ final class Probe
     /** The journal mode the live connection is actually in. */
     public static function journalMode(): string
     {
-        return (string) (DB::select('PRAGMA journal_mode')[0]->journal_mode ?? 'unknown');
+        try {
+            return (string) (DB::select('PRAGMA journal_mode')[0]->journal_mode ?? 'unknown');
+        } catch (Throwable $e) {
+            return 'unavailable: '.$e->getMessage();
+        }
     }
 
     /**
@@ -137,6 +143,34 @@ final class Probe
         ksort($out);
 
         return $out;
+    }
+
+    /**
+     * The NAMES of the keys in the .env Cloud drops into the container.
+     *
+     * Cloud copies /opt/cloud/.env over /var/www/html/.env at container start,
+     * and some of what it delivers arrives only that way — which matters because
+     * the Litestream shim runs before the framework has read the file.
+     *
+     * @return array<int, string>
+     */
+    private static function dotenvKeys(): array
+    {
+        if (! is_readable($file = base_path('.env'))) {
+            return [];
+        }
+
+        $keys = [];
+
+        foreach (preg_split('/\R/', (string) file_get_contents($file)) ?: [] as $line) {
+            if (str_contains($line, '=') && ! str_starts_with(ltrim($line), '#')) {
+                $keys[] = trim(explode('=', $line, 2)[0]);
+            }
+        }
+
+        sort($keys);
+
+        return $keys;
     }
 
     /** @return array<string, bool> */
